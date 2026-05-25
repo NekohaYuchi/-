@@ -23,7 +23,7 @@ except FileNotFoundError as e:
 y_proba_all = model_pipeline.predict_proba(X_test)[:, 1]
 
 # ==========================================
-# 2. 數據視覺化前處理 (使用 NumPy 陣列確保前端圖表 100% 穩定)
+# 2. 數據視覺化前處理
 # ==========================================
 xgb_classifier = model_pipeline.named_steps['classifier']
 importances = xgb_classifier.feature_importances_
@@ -47,7 +47,7 @@ np.random.seed(42)
 sampled_safe_positions = np.random.choice(safe_positions, 500, replace=False)
 plot_positions = np.concatenate([fraud_positions, sampled_safe_positions])
 
-# 建立極度乾淨、無 Pandas Index 衝突的繪圖資料表
+# 建立繪圖資料表
 df_pca_plot = pd.DataFrame({
     'V1': v1_all[plot_positions],
     'V2': v2_all[plot_positions],
@@ -55,7 +55,7 @@ df_pca_plot = pd.DataFrame({
     'Class': ['Fraud (詐騙)' if y == 1 else 'Safe (正常)' for y in y_all[plot_positions]]
 })
 
-# 新增功能 2：預先試算全體閥值的利潤曲線數據，避免移動滑桿時即時大重算導致卡頓
+# 預先試算全體閥值的利潤曲線數據，避免移動滑桿時即時大重算導致卡頓
 thresholds = np.arange(0.01, 1.00, 0.01)
 profit_list = []
 cost_per_fn_fixed = 250
@@ -85,13 +85,11 @@ history_data = []
 current_tx_state = {"id": None, "score": 0.0} 
 
 def handle_scenario(scenario_name):
-    """商管場景快捷鍵：防呆優化版，自動捕捉關鍵字"""
     if "嚴格資安防禦" in scenario_name: return 0.20
     elif "客戶體驗優先" in scenario_name: return 0.80
     else: return 0.50
 
 def process_ui_updates(threshold, is_new_transaction=False):
-    """引擎本體：根據 is_new_transaction 決定要不要抽新牌"""
     global history_data, current_tx_state
     
     # 3.1 抽樣與記憶邏輯 (報告 Demo 專用 30% 高機率版)
