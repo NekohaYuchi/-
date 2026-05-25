@@ -10,7 +10,7 @@ from sklearn.metrics import confusion_matrix
 # ==========================================
 # 1. 載入模型 Pipeline 與測試數據
 # ==========================================
-print("正在載入隨機森林模型管線與測試數據...")
+print("正在載入xgboost模型與測試數據...")
 try:
     model_pipeline = joblib.load('fraud_model_pipeline.pkl')
     X_test, y_test = joblib.load('test_data.pkl')
