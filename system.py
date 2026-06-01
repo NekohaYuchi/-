@@ -122,7 +122,7 @@ def process_ui_updates(threshold, cost_fn, cost_fp, is_new_transaction=False):
     else:
         action_sop = (
             "[標準商務流程放行]:\n"
-            "1. 交易通過隨機森林演算法風控比對，毫秒級授權成功。\n"
+            "1. 交易通過 XGBoost 演算法風控比對，毫秒級授權成功。\n"
             "2. 計入當日持卡人正常消費信用額度，保障刷卡順暢體驗。"
         )
     
