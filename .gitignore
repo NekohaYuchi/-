@@ -1,5 +1,7 @@
 # 模型與資料（檔案過大，需在本地訓練產生）
-*.pkl
+fraud_model_pipeline.pkl
+test_data.pkl
+scaler.pkl
 daily_report.csv
 
 # Brainstorm 暫存

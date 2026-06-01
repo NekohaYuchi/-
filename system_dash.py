@@ -30,6 +30,7 @@ COLORS = {
 print("載入模型與測試數據...")
 model_pipeline = joblib.load("fraud_model_pipeline.pkl")
 X_test, y_test = joblib.load("test_data.pkl")
+scaler        = joblib.load("scaler.pkl")
 print("載入成功")
 
 y_proba_all = model_pipeline.predict_proba(X_test)[:, 1]
@@ -110,7 +111,7 @@ EMPTY_TABLE_ROWS = [
 ] * 5
 
 TABLE_KWARGS = dict(
-    style_table={"overflowX": "auto"},
+    style_table={"overflowX": "auto", "overflowY": "auto", "maxHeight": "320px"},
     style_header={
         "backgroundColor": COLORS["bg_sidebar"],
         "color": COLORS["cyan"], "fontWeight": "600",
@@ -155,8 +156,11 @@ def page_monitor():
                     columns=[{"name": c, "id": c} for c in
                              ["交易ID", "風險評分", "系統判定狀態", "處置優先級"]],
                     data=EMPTY_TABLE_ROWS,
+                    row_selectable="single",
+                    selected_rows=[],
                     **TABLE_KWARGS,
                 ),
+                html.Div(id="tx-detail-panel", style={"marginTop": "12px"}),
             ], width=8),
             dbc.Col([
                 html.Pre(id="profit-display", children="—",
@@ -241,7 +245,8 @@ app.layout = html.Div([
     dcc.Store(id="history-store",  data=[]),
     dcc.Store(id="settings-store", data={"threshold": 0.50, "cost_fn": 250, "cost_fp": 15}),
     dcc.Store(id="report-store"),
-    dcc.Interval(id="init-interval", interval=100, max_intervals=1),
+    dcc.Interval(id="init-interval",   interval=100,  max_intervals=1),
+    dcc.Interval(id="stream-interval", interval=2000, disabled=True),
 
     # ── 側邊欄 ──────────────────────────────────────
     html.Div([
@@ -339,6 +344,20 @@ def handle_scenario(scenario):
 
 
 @app.callback(
+    Output("stream-interval", "disabled"),
+    Output("simulate-btn",    "children"),
+    Output("simulate-btn",    "color"),
+    Input("simulate-btn",     "n_clicks"),
+    State("stream-interval",  "disabled"),
+    prevent_initial_call=True,
+)
+def toggle_stream(n_clicks, is_disabled):
+    if is_disabled:
+        return False, "停止接收", "danger"
+    return True, "接收即時交易", "primary"
+
+
+@app.callback(
     Output("kpi-intercepted",  "children"),
     Output("kpi-saved",        "children"),
     Output("kpi-auc",          "children"),
@@ -347,11 +366,13 @@ def handle_scenario(scenario):
     Output("sop-display",      "children"),
     Output("profit-display",   "children"),
     Output("stream-table",     "data"),
+    Output("stream-table",     "selected_rows"),
     Output("profit-curve",     "figure"),
     Output("tx-state",         "data"),
     Output("history-store",    "data"),
     Output("settings-store",   "data"),
     Input("init-interval",     "n_intervals"),
+    Input("stream-interval",   "n_intervals"),
     Input("simulate-btn",      "n_clicks"),
     Input("threshold-slider",  "value"),
     Input("cost-fn-slider",    "value"),
@@ -360,10 +381,10 @@ def handle_scenario(scenario):
     State("history-store",     "data"),
     prevent_initial_call=False,
 )
-def update_dashboard(n_intervals, n_clicks, threshold, cost_fn, cost_fp,
+def update_dashboard(n_intervals, n_stream, n_clicks, threshold, cost_fn, cost_fp,
                      tx_state, history_data):
     triggered = ctx.triggered_id
-    is_new_tx = triggered in ("simulate-btn", "init-interval") or tx_state["id"] is None
+    is_new_tx = triggered in ("simulate-btn", "init-interval", "stream-interval") or tx_state["id"] is None
 
     # ── 抽樣一筆交易 ─────────────────────────────────
     if is_new_tx:
@@ -371,12 +392,29 @@ def update_dashboard(n_intervals, n_clicks, threshold, cost_fn, cost_fp,
             idx = int(np.random.choice(np.where(y_all == 1)[0]))
         else:
             idx = int(np.random.choice(np.where(y_all == 0)[0]))
-        risk  = float(model_pipeline.predict_proba(X_test.iloc[[idx]])[0][1])
-        tx_id = f"#TX-{np.random.randint(10000, 99999)}"
-        tx_state = {"id": tx_id, "score": risk}
+        sample = X_test.iloc[[idx]]
+        risk   = float(model_pipeline.predict_proba(sample)[0][1])
+        tx_id  = f"#TX-{np.random.randint(10000, 99999)}"
+
+        # 反標準化取得原始金額與時間
+        time_std   = float(sample["Time"].values[0])
+        amount_std = float(sample["Amount"].values[0])
+        original   = scaler.inverse_transform([[time_std, amount_std]])[0]
+        time_sec   = float(original[0])
+        amount_eur = float(original[1])
+        true_label = int(y_all[idx])
+
+        tx_state = {
+            "id": tx_id, "score": risk,
+            "time_sec": time_sec, "amount_eur": amount_eur,
+            "true_label": true_label,
+        }
     else:
-        tx_id = tx_state["id"]
-        risk  = tx_state["score"]
+        tx_id      = tx_state["id"]
+        risk       = tx_state["score"]
+        time_sec   = tx_state.get("time_sec", 0.0)
+        amount_eur = tx_state.get("amount_eur", 0.0)
+        true_label = tx_state.get("true_label", -1)
 
     # ── 判定結果與 SOP ───────────────────────────────
     is_fraud   = risk >= threshold
@@ -403,15 +441,19 @@ def update_dashboard(n_intervals, n_clicks, threshold, cost_fn, cost_fp,
 
     # ── 更新交易歷史 ─────────────────────────────────
     if is_new_tx:
-        history_data = [[tx_id, round(risk, 4), status_txt, priority]] + history_data
-        history_data = history_data[:5]
+        history_data = [{
+            "交易ID": tx_id, "風險評分": round(risk, 4),
+            "系統判定狀態": status_txt, "處置優先級": priority,
+            "_risk_raw":   risk,       "_is_fraud":   is_fraud,
+            "_sop":        sop,        "_true_label": true_label,
+            "_amount_eur": amount_eur, "_time_sec":   time_sec,
+        }] + history_data
+        history_data = history_data[:20]
     elif history_data:
-        history_data[0][2] = status_txt
-        history_data[0][3] = priority
+        history_data[0]["系統判定狀態"] = status_txt
+        history_data[0]["處置優先級"]   = priority
 
-    table_rows = history_data + [["-", "-", "-", "-"]] * (5 - len(history_data))
-    df_table = pd.DataFrame(table_rows,
-                             columns=["交易ID", "風險評分", "系統判定狀態", "處置優先級"])
+    table_rows = history_data if history_data else EMPTY_TABLE_ROWS
 
     # ── 利潤計算 ─────────────────────────────────────
     y_pred = (y_proba_all >= threshold).astype(int)
@@ -465,7 +507,7 @@ def update_dashboard(n_intervals, n_clicks, threshold, cost_fn, cost_fp,
 
     return (
         str(tp), f"${prevented:,}", str(AUC_SCORE), str(round(threshold, 2)),
-        status_txt, sop, profit_txt, df_table.to_dict("records"),
+        status_txt, sop, profit_txt, table_rows, [],
         fig_curve, tx_state, history_data, settings,
     )
 
@@ -540,6 +582,95 @@ def download_report(n_clicks, store_data):
     if not store_data:
         return no_update
     return dcc.send_string(store_data["content"], store_data["filename"])
+
+
+@app.callback(
+    Output("tx-detail-panel", "children"),
+    Input("stream-table",     "selected_rows"),
+    State("stream-table",     "data"),
+    State("settings-store",   "data"),
+    prevent_initial_call=True,
+)
+def show_tx_detail(selected_rows, data, settings):
+    if not selected_rows or not data:
+        return None
+    row = data[selected_rows[0]]
+    if row.get("交易ID") == "-" or "_risk_raw" not in row:
+        return None
+
+    risk        = row["_risk_raw"]
+    sop_text    = row["_sop"]
+    true_label  = row.get("_true_label", -1)
+    amount_eur  = row.get("_amount_eur", 0.0)
+    time_sec    = row.get("_time_sec",   0.0)
+    threshold   = settings.get("threshold", 0.5)
+
+    # 判斷 TP/TN/FP/FN（以當前閥值即時計算）
+    predicted = risk >= threshold
+    if   true_label == 1 and predicted:      verdict = "TP — 成功攔截";       verdict_color = COLORS["safe"]
+    elif true_label == 0 and not predicted:  verdict = "TN — 正確放行";       verdict_color = COLORS["safe"]
+    elif true_label == 0 and predicted:      verdict = "FP — 誤報（實際正常）"; verdict_color = COLORS["warning"]
+    elif true_label == 1 and not predicted:  verdict = "FN — 漏抓（實際詐騙）"; verdict_color = COLORS["fraud"]
+    else:                                    verdict = "—";                   verdict_color = COLORS["text_muted"]
+
+    true_label_txt   = "詐騙" if true_label == 1 else "正常" if true_label == 0 else "—"
+    true_label_color = COLORS["fraud"] if true_label == 1 else COLORS["safe"]
+    status_color     = COLORS["fraud"] if predicted else COLORS["safe"]
+    bar_color        = COLORS["fraud"] if risk > 0.7 else COLORS["warning"] if risk > 0.3 else COLORS["safe"]
+
+    # 時間轉換：秒 → 小時分鐘
+    h = int(time_sec // 3600)
+    m = int((time_sec % 3600) // 60)
+    time_display = f"T+{h}h {m:02d}m"
+
+    def info_row(label, value, value_color=COLORS["text"]):
+        return html.Div([
+            html.Span(label, style={"color": COLORS["text_muted"], "fontSize": "11px",
+                                    "width": "90px", "display": "inline-block"}),
+            html.Span(value, style={"color": value_color, "fontFamily": "monospace",
+                                    "fontSize": "12px", "fontWeight": "bold"}),
+        ], style={"marginBottom": "5px"})
+
+    return dbc.Card([
+        dbc.CardBody([
+            # Header
+            html.Div([
+                html.Span(row["交易ID"], style={
+                    "fontFamily": "monospace", "fontSize": "14px",
+                    "color": COLORS["cyan"], "fontWeight": "bold"
+                }),
+                html.Span(row["系統判定狀態"], style={
+                    "fontSize": "12px", "color": status_color,
+                    "fontWeight": "bold", "marginLeft": "14px"
+                }),
+            ], style={"marginBottom": "10px"}),
+
+            # Risk bar
+            html.Div([
+                html.Div(style={"height": "4px", "borderRadius": "2px",
+                                "backgroundColor": COLORS["border"]}),
+                html.Div(style={"height": "4px", "borderRadius": "2px",
+                                "width": f"{min(risk*100, 100):.1f}%",
+                                "backgroundColor": bar_color, "marginTop": "-4px"}),
+            ], style={"marginBottom": "10px"}),
+
+            # Info grid
+            info_row("風險評分",  f"{risk:.4f}  ({risk*100:.1f}%)", bar_color),
+            info_row("交易金額",  f"€{amount_eur:,.2f}"),
+            info_row("發生時間",  time_display),
+            html.Hr(style={"borderColor": COLORS["border"], "margin": "8px 0"}),
+            info_row("真實標籤",  true_label_txt,  true_label_color),
+            info_row("模型結果",  verdict,          verdict_color),
+            info_row("處置優先",  row["處置優先級"], COLORS["text_muted"]),
+            html.Hr(style={"borderColor": COLORS["border"], "margin": "8px 0"}),
+            html.Pre(sop_text, style={
+                "color": COLORS["text_muted"], "fontSize": "11px",
+                "whiteSpace": "pre-wrap", "marginBottom": 0,
+                "fontFamily": "monospace", "lineHeight": "1.6",
+            }),
+        ], style={"padding": "12px"})
+    ], style={"backgroundColor": COLORS["bg_input"],
+              "border": f"1px solid {COLORS['border']}"})
 
 
 if __name__ == "__main__":

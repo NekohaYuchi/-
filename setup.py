@@ -7,8 +7,9 @@ import os
 import sys
 
 ASSETS = {
-    "fraud_model_pipeline.pkl": "https://github.com/NekohaYuchi/-/releases/download/v1.0.0/fraud_model_pipeline.pkl",
-    "test_data.pkl":            "https://github.com/NekohaYuchi/-/releases/download/v1.0.0/test_data.pkl",
+    "fraud_model_pipeline.pkl": "https://github.com/NekohaYuchi/-/releases/download/v1.1.0/fraud_model_pipeline.pkl",
+    "test_data.pkl":            "https://github.com/NekohaYuchi/-/releases/download/v1.1.0/test_data.pkl",
+    "scaler.pkl":               "https://github.com/NekohaYuchi/-/releases/download/v1.1.0/scaler.pkl",
 }
 
 def download(filename, url):
