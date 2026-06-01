@@ -1,5 +1,8 @@
 import os
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
+from datetime import datetime
+import base64
+import io
 
 import pandas as pd
 import numpy as np
@@ -93,6 +96,15 @@ recent_tx_indices = list(
 )
 
 # ── 版面 helpers ──────────────────────────────────────────
+
+def _metric_row(label, value, value_color=None):
+    return html.Div([
+        html.Span(label, style={"color": COLORS["text_muted"], "fontSize": "11px",
+                                 "width": "120px", "display": "inline-block"}),
+        html.Span(value, style={"color": value_color or COLORS["text"],
+                                 "fontFamily": "monospace", "fontSize": "12px"}),
+    ], style={"marginBottom": "5px"})
+
 
 def make_kpi_card(title, value_id, color):
     return dbc.Card([
@@ -199,19 +211,12 @@ def page_report():
     return html.Div([
         dbc.Row([
             dbc.Col([
-                dbc.Button("產生管理報表", id="report-btn", color="secondary",
-                           className="mb-3"),
-                html.Pre(id="report-summary", children="（尚未產生報表）",
-                         style={"color": COLORS["text"], "fontSize": "12px",
-                                "whiteSpace": "pre-wrap",
-                                "backgroundColor": COLORS["bg_card"],
-                                "padding": "12px", "borderRadius": "6px",
-                                "border": f"1px solid {COLORS['border']}",
-                                "marginBottom": "12px"}),
+                dbc.Button("產生管理報表", id="report-btn", color="primary", className="mb-3"),
+                html.Div(id="report-content-area"),
                 dcc.Download(id="report-download"),
-                dbc.Button("下載報表 CSV", id="download-btn",
-                           color="success", style={"display": "none"}),
-            ], width=8),
+                dbc.Button("下載 Excel 報表", id="download-btn",
+                           color="success", style={"display": "none"}, className="mt-3"),
+            ]),
         ]),
     ])
 
@@ -245,8 +250,9 @@ app.layout = html.Div([
     dcc.Store(id="history-store",  data=[]),
     dcc.Store(id="settings-store", data={"threshold": 0.50, "cost_fn": 250, "cost_fp": 15}),
     dcc.Store(id="report-store"),
+    dcc.Store(id="session-stats", data={"intercepted": 0, "protected": 0.0}),
     dcc.Interval(id="init-interval",   interval=100,  max_intervals=1),
-    dcc.Interval(id="stream-interval", interval=2000, disabled=True),
+    dcc.Interval(id="stream-interval", interval=500, disabled=True),
 
     # ── 側邊欄 ──────────────────────────────────────
     html.Div([
@@ -371,6 +377,7 @@ def toggle_stream(n_clicks, is_disabled):
     Output("tx-state",         "data"),
     Output("history-store",    "data"),
     Output("settings-store",   "data"),
+    Output("session-stats",    "data"),
     Input("init-interval",     "n_intervals"),
     Input("stream-interval",   "n_intervals"),
     Input("simulate-btn",      "n_clicks"),
@@ -379,10 +386,11 @@ def toggle_stream(n_clicks, is_disabled):
     Input("cost-fp-slider",    "value"),
     State("tx-state",          "data"),
     State("history-store",     "data"),
+    State("session-stats",     "data"),
     prevent_initial_call=False,
 )
 def update_dashboard(n_intervals, n_stream, n_clicks, threshold, cost_fn, cost_fp,
-                     tx_state, history_data):
+                     tx_state, history_data, session_stats):
     triggered = ctx.triggered_id
     is_new_tx = triggered in ("simulate-btn", "init-interval", "stream-interval") or tx_state["id"] is None
 
@@ -438,6 +446,13 @@ def update_dashboard(n_intervals, n_stream, n_clicks, threshold, cost_fn, cost_f
         "Level 2 (人工確認)" if is_fraud else
         "Level 3 (自動化驗證)"
     )
+
+    # ── 累積今日攔截統計 ─────────────────────────────
+    if is_new_tx and is_fraud:
+        session_stats = {
+            "intercepted": session_stats["intercepted"] + 1,
+            "protected":   session_stats["protected"]   + max(amount_eur, 0.0),
+        }
 
     # ── 更新交易歷史 ─────────────────────────────────
     if is_new_tx:
@@ -506,18 +521,20 @@ def update_dashboard(n_intervals, n_stream, n_clicks, threshold, cost_fn, cost_f
     settings = {"threshold": threshold, "cost_fn": cost_fn, "cost_fp": cost_fp}
 
     return (
-        str(tp), f"${prevented:,}", str(AUC_SCORE), str(round(threshold, 2)),
+        str(session_stats["intercepted"]),
+        f"${session_stats['protected']:,.2f}",
+        str(AUC_SCORE), str(round(threshold, 2)),
         status_txt, sop, profit_txt, table_rows, [],
-        fig_curve, tx_state, history_data, settings,
+        fig_curve, tx_state, history_data, settings, session_stats,
     )
 
 
 @app.callback(
-    Output("report-summary", "children"),
-    Output("report-store",   "data"),
-    Output("download-btn",   "style"),
-    Input("report-btn",      "n_clicks"),
-    State("settings-store",  "data"),
+    Output("report-content-area", "children"),
+    Output("report-store",        "data"),
+    Output("download-btn",        "style"),
+    Input("report-btn",           "n_clicks"),
+    State("settings-store",       "data"),
     prevent_initial_call=True,
 )
 def generate_report(n_clicks, settings):
@@ -525,51 +542,487 @@ def generate_report(n_clicks, settings):
     cost_fn   = settings["cost_fn"]
     cost_fp   = settings["cost_fp"]
 
+    # ── 基礎統計 ──────────────────────────────────────
     recent_y     = y_test.iloc[recent_tx_indices]
     recent_proba = y_proba_all[recent_tx_indices]
     y_pred       = (recent_proba >= threshold).astype(int)
-    cm = confusion_matrix(recent_y, y_pred, labels=[0, 1])
-    if cm.size == 4:
-        tn, fp, fn, tp = cm.ravel()
-    else:
-        tn = int(len(recent_y) - sum(y_pred))
-        fp = fn = 0
-        tp = int(sum(y_pred))
+    labels       = recent_y.values
 
-    saved_loss  = int(tp) * cost_fn
+    cm = confusion_matrix(recent_y, y_pred, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (
+        int(len(recent_y) - sum(y_pred)), 0, 0, int(sum(y_pred)))
+
+    # ── 原始金額與時間（inverse transform） ────────────
+    orig = scaler.inverse_transform(
+        X_test.iloc[recent_tx_indices][['Time', 'Amount']])
+    time_arr   = orig[:, 0]
+    amount_arr = orig[:, 1]
+
+    # ── 財務計算 ──────────────────────────────────────
+    saved     = int(tp) * cost_fn
+    fp_cost   = int(fp) * cost_fp
+    fn_cost   = int(fn) * cost_fn
+    friction  = fp_cost + fn_cost
+    net       = saved - friction
+
+    # ── 模型指標 ──────────────────────────────────────
+    precision = tp / (tp + fp)  if (tp + fp) > 0  else 0.0
+    recall    = tp / (tp + fn)  if (tp + fn) > 0  else 0.0
+    f1        = 2*precision*recall / (precision+recall) if (precision+recall) > 0 else 0.0
     profit_arr  = (CURVE_STATS["TP"] * cost_fn
                    - (CURVE_STATS["FP"] * cost_fp + CURVE_STATS["FN"] * cost_fn))
     best_thresh = float(CURVE_STATS["Threshold"].iloc[np.argmax(profit_arr)])
+    report_time = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    summary = (
-        f"=== 今日風控摘要 ===\n\n"
-        f"總交易量：{len(recent_y)} 筆\n"
-        f"攔截詐騙：{tp} 筆\n"
-        f"誤攔交易：{fp} 筆\n"
-        f"成功阻止損失：${saved_loss:,}\n"
-        f"最佳 Threshold：{best_thresh:.2f}\n"
-        f"模型 AUC：{AUC_SCORE}"
-    )
+    # ── 高風險交易清單（FP + 高風險 FN） ──────────────
+    fp_mask = (y_pred == 1) & (labels == 0)
+    fn_mask = (y_pred == 0) & (labels == 1) & (recent_proba > 0.3)
+    hr_idx_all = np.where(fp_mask | fn_mask)[0]
+    hr_idx_all = hr_idx_all[np.argsort(-recent_proba[hr_idx_all])]  # 全部，依風險排序
+    hr_idx_top = hr_idx_all[:20]                                      # 前 20 筆供 UI 顯示
 
-    report_df = pd.DataFrame({
-        "Transaction_ID": [f"TX-{np.random.randint(100000, 999999)}"
-                           for _ in range(len(recent_y))],
-        "Risk_Score":     np.round(recent_proba, 4),
-        "Is_Fraud_Real":  recent_y.values,
-        "System_Blocked": y_pred,
-    })
-    report_df["Status"] = report_df.apply(
-        lambda x: (
-            "True Positive (成功攔截)"  if x["Is_Fraud_Real"] == 1 and x["System_Blocked"] == 1 else
-            "False Positive (客戶誤擋)" if x["Is_Fraud_Real"] == 0 and x["System_Blocked"] == 1 else
-            "False Negative (漏抓損失)" if x["Is_Fraud_Real"] == 1 and x["System_Blocked"] == 0 else
-            "True Negative (安全放行)"
-        ), axis=1,
-    )
+    def fmt_time(sec):
+        return f"T+{int(sec//3600)}h{int((sec%3600)//60):02d}m"
 
-    csv_content = report_df.to_csv(index=False, encoding="utf-8-sig")
-    store = {"filename": "daily_report.csv", "content": csv_content}
-    return summary, store, {"display": "inline-block"}
+    def make_hr_row(i):
+        return {
+            "交易ID":   f"TX-{np.random.randint(100000,999999)}",
+            "時間":     fmt_time(time_arr[i]),
+            "金額":     f"${amount_arr[i]:,.2f}",
+            "風險評分": round(float(recent_proba[i]), 4),
+            "類型":     "FP — 誤報" if fp_mask[i] else "FN — 漏抓",
+            "建議行動": "需主動回電解除凍結" if fp_mask[i] else "需人工複核",
+        }
+
+    highrisk_rows     = [make_hr_row(i) for i in hr_idx_top]   # UI 用（top 20）
+    highrisk_rows_all = [make_hr_row(i) for i in hr_idx_all]   # CSV 用（全部）
+
+    # ── Section helpers ──────────────────────────────
+    def section_title(text):
+        return html.P(text, style={
+            "color": COLORS["cyan"], "fontSize": "12px", "fontWeight": "bold",
+            "borderBottom": f"1px solid {COLORS['border']}",
+            "paddingBottom": "4px", "marginBottom": "10px", "marginTop": "16px",
+        })
+
+    def stat_card(label, value, color=COLORS["text"]):
+        return dbc.Col(dbc.Card(dbc.CardBody([
+            html.P(label, style={"color": COLORS["text_muted"], "fontSize": "10px",
+                                  "marginBottom": "2px"}),
+            html.H5(value, style={"color": color, "fontFamily": "monospace",
+                                   "fontWeight": "bold", "marginBottom": 0}),
+        ], style={"padding": "10px"}), style={
+            "backgroundColor": COLORS["bg_input"],
+            "border": f"1px solid {COLORS['border']}"}), width=3)
+
+    def cm_cell(value, bg, color):
+        return html.Td(str(value), style={
+            "backgroundColor": bg, "color": color,
+            "fontFamily": "monospace", "textAlign": "center",
+            "padding": "8px 16px", "fontWeight": "bold", "fontSize": "14px",
+            "border": f"1px solid {COLORS['border']}",
+        })
+
+    # ── 組裝 HTML 報表 ────────────────────────────────
+    content = html.Div([
+
+        # Header
+        html.Div([
+            html.Span("風控管理報表", style={"color": COLORS["text"], "fontSize": "15px",
+                                              "fontWeight": "bold"}),
+            html.Span(f"  {report_time}", style={"color": COLORS["text_muted"],
+                                                   "fontFamily": "monospace", "fontSize": "11px",
+                                                   "marginLeft": "12px"}),
+        ], style={"marginBottom": "4px"}),
+        html.Span(
+            f"Threshold: {threshold}  |  FN Cost: ${cost_fn}  |  FP Cost: ${cost_fp}",
+            style={"color": COLORS["text_muted"], "fontSize": "11px", "fontFamily": "monospace"}),
+
+        # 一、執行摘要
+        section_title("一、執行摘要"),
+        dbc.Row([
+            stat_card("總交易量",   f"{len(recent_y):,} 筆"),
+            stat_card("詐騙攔截率", f"{recall*100:.1f}%",   COLORS["safe"]),
+            stat_card("防護金額",   f"${saved:,}",          COLORS["safe"]),
+            stat_card("風控淨效益", f"${net:,}",
+                      COLORS["safe"] if net >= 0 else COLORS["fraud"]),
+        ], className="g-2 mb-2"),
+
+        # 二、風控績效指標
+        section_title("二、風控績效指標"),
+        dbc.Row([
+            dbc.Col([
+                html.Table([
+                    html.Tbody([
+                        html.Tr([
+                            html.Td(""),
+                            html.Td("預測詐騙", style={"color": COLORS["fraud"],
+                                                        "fontSize": "11px", "textAlign": "center",
+                                                        "padding": "4px 12px"}),
+                            html.Td("預測正常", style={"color": COLORS["safe"],
+                                                        "fontSize": "11px", "textAlign": "center",
+                                                        "padding": "4px 12px"}),
+                        ]),
+                        html.Tr([
+                            html.Td("實際詐騙", style={"color": COLORS["fraud"],
+                                                        "fontSize": "11px", "padding": "4px 8px"}),
+                            cm_cell(tp, "#0d3320", COLORS["safe"]),
+                            cm_cell(fn, "#3a1a1a", COLORS["fraud"]),
+                        ]),
+                        html.Tr([
+                            html.Td("實際正常", style={"color": COLORS["safe"],
+                                                        "fontSize": "11px", "padding": "4px 8px"}),
+                            cm_cell(fp, "#2d2510", COLORS["warning"]),
+                            cm_cell(f"{tn:,}", "#0d1a2e", COLORS["accent"]),
+                        ]),
+                    ])
+                ], style={"borderCollapse": "collapse"}),
+            ], width=5),
+            dbc.Col([
+                _metric_row("Precision",   f"{precision:.3f}  ({precision*100:.1f}%)"),
+                _metric_row("Recall",      f"{recall:.3f}  ({recall*100:.1f}%)"),
+                _metric_row("F1 Score",    f"{f1:.3f}"),
+                _metric_row("Model AUC",   f"{AUC_SCORE}"),
+                html.Hr(style={"borderColor": COLORS["border"], "margin": "6px 0"}),
+                _metric_row("誤攔成本",    f"${fp_cost:,}  ({fp} 筆 × ${cost_fp})"),
+                _metric_row("漏抓損失",    f"${fn_cost:,}  ({fn} 筆 × ${cost_fn})"),
+                _metric_row("最佳閥值建議", f"{best_thresh:.2f}",    COLORS["warning"]),
+            ], width=7),
+        ], className="mb-2"),
+
+        # 三、高風險交易清單
+        section_title(f"三、高風險交易清單（FP + 高風險 FN，共 {len(highrisk_rows_all)} 筆，"
+                       "介面顯示前 20 筆，完整清單請下載 Excel）"),
+        dash_table.DataTable(
+            columns=[{"name": c, "id": c} for c in
+                     ["交易ID", "時間", "金額", "風險評分", "類型", "建議行動"]],
+            data=highrisk_rows or [{"交易ID": "（本次無高風險交易）", "時間": "-",
+                                     "金額": "-", "風險評分": "-",
+                                     "類型": "-", "建議行動": "-"}],
+            style_table={"overflowX": "auto"},
+            style_header={"backgroundColor": COLORS["bg_sidebar"], "color": COLORS["cyan"],
+                          "fontWeight": "600", "border": f"1px solid {COLORS['border']}",
+                          "fontSize": "11px", "letterSpacing": "0.04em"},
+            style_cell={"backgroundColor": COLORS["bg_input"], "color": COLORS["text_muted"],
+                        "textAlign": "center", "padding": "7px 10px",
+                        "border": f"1px solid {COLORS['border']}",
+                        "fontFamily": "monospace", "fontSize": "12px"},
+            style_data_conditional=[
+                {"if": {"filter_query": '{類型} contains "FP"'},
+                 "color": COLORS["warning"], "fontWeight": "bold"},
+                {"if": {"filter_query": '{類型} contains "FN"'},
+                 "color": COLORS["fraud"], "fontWeight": "bold"},
+            ],
+        ),
+    ])
+
+    # ── Excel 報告 ──
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+
+    summary_rows = [
+        ["總交易量", len(recent_y), "筆"],
+        ["詐騙攔截率", recall, ""],
+        ["防護金額", saved, "USD"],
+        ["風控淨效益", net, "USD"],
+    ]
+    performance_rows = [
+        ["TP（成功攔截）", tp, "真詐騙且被攔截"],
+        ["FP（誤報）", fp, "實際正常但被攔截"],
+        ["FN（漏抓）", fn, "真詐騙但未攔截"],
+        ["TN（正確放行）", tn, "實際正常且放行"],
+        ["Precision", precision, f"{precision*100:.1f}%"],
+        ["Recall", recall, f"{recall*100:.1f}%"],
+        ["F1 Score", f1, ""],
+        ["Model AUC", AUC_SCORE, ""],
+        ["誤攔成本", fp_cost, f"{fp} 筆 x ${cost_fp}"],
+        ["漏抓損失", fn_cost, f"{fn} 筆 x ${cost_fn}"],
+        ["最佳閥值建議", best_thresh, "以當前成本參數最大化淨效益"],
+    ]
+    highrisk_export_rows = [
+        [row["交易ID"], row["時間"],
+         float(row["金額"].replace("$", "").replace(",", "")),  # 數字而非字串，Excel 可排序
+         row["風險評分"], row["類型"], row["建議行動"]]
+        for row in highrisk_rows_all
+    ]
+    detail_rows = []
+    for i in range(len(recent_y)):
+        r, p = int(labels[i]), int(y_pred[i])
+        result = ("TP" if r==1 and p==1 else "FP" if r==0 and p==1
+                  else "FN" if r==1 and p==0 else "TN")
+        prob = float(recent_proba[i])
+        detail_rows.append([
+            f"TX-{np.random.randint(100000,999999)}",
+            fmt_time(time_arr[i]),
+            round(float(amount_arr[i]), 2),
+            round(prob, 4),
+            "高" if prob > 0.7 else "中" if prob > 0.3 else "低",
+            "詐騙" if r == 1 else "正常",
+            "攔截" if p == 1 else "放行",
+            result,
+            ("Level 1 (緊急阻斷)" if prob > 0.9 and p == 1
+             else "Level 2 (人工確認)" if p == 1
+             else "Level 3 (自動化驗證)"),
+        ])
+
+    from openpyxl.formatting.rule import DataBarRule, FormulaRule
+
+    # ─ 色票與工具 ─
+    def _f(h): return PatternFill("solid", fgColor=h)
+    def _s(c="CBD5E1"): return Side(style="thin", color=c)
+    def _b4(c="CBD5E1"):
+        s = _s(c); return Border(left=s, right=s, top=s, bottom=s)
+
+    F_BANNER  = _f("1E3A8A"); F_PARAMS  = _f("EFF6FF")
+    F_SECTION = _f("1D4ED8"); F_HDR     = _f("1E293B")
+    F_ALT     = _f("F8FAFC"); F_WHITE   = _f("FFFFFF")
+    F_GREEN   = _f("DCFCE7"); F_RED     = _f("FEE2E2"); F_ORANGE = _f("FEF3C7")
+    FULL_B    = _b4();         BOT_B    = Border(bottom=_s())
+
+    def _w(v):
+        return sum(2 if ord(c) > 127 else 1 for c in str(v if v is not None else ""))
+
+    def auto_w(sheet, pad=3, lo=12, hi=55):
+        for col in sheet.columns:
+            sheet.column_dimensions[get_column_letter(col[0].column)].width = \
+                min(max(max(_w(c.value) for c in col) + pad, lo), hi)
+
+    # ══ Sheet 1：管理摘要 ════════════════════════════════
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "管理摘要"
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = "1E3A8A"
+    ws.freeze_panes = "A6"
+
+    ws.append(["風控管理報表", "", "", "", report_time, ""])    # 1
+    ws.append(["", f"Threshold = {threshold}",
+               f"FN Cost = ${cost_fn}", f"FP Cost = ${cost_fp}", "", ""])  # 2
+    ws.append([])                            # 3
+    ws.append(["一、執行摘要"])               # 4
+    ws.append(["指標", "數值", "單位"])       # 5
+    for row in summary_rows:   ws.append(row)      # 6–9
+    ws.append([])                            # 10
+    ws.append(["二、風控績效指標"])            # 11
+    ws.append(["指標", "數值", "備註"])       # 12
+    for row in performance_rows: ws.append(row)    # 13–23
+
+    # 橫幅 (row 1)
+    ws.merge_cells("A1:D1")
+    ws["A1"].fill = F_BANNER
+    ws["A1"].font = Font(color="FFFFFF", bold=True, size=15)
+    ws["A1"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws["E1"].fill = F_BANNER
+    ws["E1"].font = Font(color="BFD7FF", size=10, italic=True)
+    ws["E1"].alignment = Alignment(horizontal="right", vertical="center")
+    ws.row_dimensions[1].height = 34
+
+    # 參數列 (row 2)
+    for col in range(1, 5):
+        c = ws.cell(row=2, column=col)
+        c.fill = F_PARAMS
+        c.font = Font(color="1E40AF", size=10)
+        c.alignment = Alignment(horizontal="left" if col == 1 else "center", indent=1)
+        c.border = BOT_B
+    ws.row_dimensions[2].height = 18
+    ws.row_dimensions[3].height = 5     # 細分隔
+
+    # 執行摘要 section 標題 (row 4)
+    ws.merge_cells("A4:C4")
+    ws["A4"].fill = F_SECTION
+    ws["A4"].font = Font(color="FFFFFF", bold=True, size=11)
+    ws["A4"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws.row_dimensions[4].height = 22
+
+    # 欄位標題 (row 5)
+    for col in range(1, 4):
+        c = ws.cell(row=5, column=col)
+        c.fill = F_HDR; c.border = FULL_B
+        c.font = Font(color="FFFFFF", bold=True, size=10)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[5].height = 20
+
+    # 摘要資料 (rows 6–9)，交替底色
+    for r in range(6, 10):
+        f = F_ALT if r % 2 == 0 else F_WHITE
+        ws.row_dimensions[r].height = 20
+        for col, (ha, fnt) in enumerate([
+            ("left",  Font(size=10)),
+            ("right", Font(bold=True, size=11)),
+            ("left",  Font(color="6B7280", size=9, italic=True)),
+        ], 1):
+            c = ws.cell(row=r, column=col)
+            c.fill = f; c.border = FULL_B
+            c.font = fnt
+            c.alignment = Alignment(horizontal=ha, vertical="center",
+                                     indent=1 if ha == "left" else 0)
+
+    # 淨效益條件顏色
+    net_c = ws["B9"]
+    net_c.font = Font(bold=True, size=11,
+                       color="059669" if (net_c.value or 0) >= 0 else "DC2626")
+    ws["B7"].number_format = "0.0%"
+    ws["B8"].number_format = "$#,##0"
+    ws["B9"].number_format = "$#,##0"
+    ws.row_dimensions[10].height = 5    # 細分隔
+
+    # 績效指標 section 標題 (row 11)
+    ws.merge_cells("A11:C11")
+    ws["A11"].fill = F_SECTION
+    ws["A11"].font = Font(color="FFFFFF", bold=True, size=11)
+    ws["A11"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws.row_dimensions[11].height = 22
+
+    # 欄位標題 (row 12)
+    for col in range(1, 4):
+        c = ws.cell(row=12, column=col)
+        c.fill = F_HDR; c.border = FULL_B
+        c.font = Font(color="FFFFFF", bold=True, size=10)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[12].height = 20
+
+    # 績效資料 (rows 13–23)，交替底色
+    for r in range(13, 24):
+        f = F_ALT if r % 2 == 0 else F_WHITE
+        ws.row_dimensions[r].height = 18
+        for col, (ha, fnt) in enumerate([
+            ("left",  Font(size=10)),
+            ("right", Font(bold=True, size=11)),
+            ("left",  Font(color="6B7280", size=9, italic=True)),
+        ], 1):
+            c = ws.cell(row=r, column=col)
+            c.fill = f; c.border = FULL_B
+            c.font = fnt
+            c.alignment = Alignment(horizontal=ha, vertical="center",
+                                     indent=1 if ha == "left" else 0)
+
+    # 數字格式（績效）
+    for row_n, fmt in [(17,"0.000"),(18,"0.000"),(19,"0.000"),(20,"0.000"),
+                       (21,"$#,##0"),(22,"$#,##0"),(23,"0.00")]:
+        ws.cell(row=row_n, column=2).number_format = fmt
+    ws["B23"].font = Font(bold=True, size=11, color="D97706")
+
+    auto_w(ws)
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 18
+    ws.column_dimensions["C"].width = 32
+
+    ws.print_area = "A1:E23"
+    ws.page_setup.orientation = "portrait"
+    ws.page_setup.paperSize = 9
+    ws.oddHeader.center.text = "風控管理報表"
+    ws.oddFooter.right.text = "第 &P 頁，共 &N 頁"
+
+    # ══ Sheets 2 & 3 ════════════════════════════════════
+    sheets_cfg = [
+        ("高風險交易",   "F59E0B", False,
+         ["交易ID","時間","金額 (USD)","風險評分","類型","建議行動"],
+         highrisk_export_rows),
+        ("完整交易明細", "475569", True,
+         ["Transaction_ID","時間","金額_USD","風險評分","風險等級",
+          "真實標籤","系統判定","結果","處置優先級"],
+         detail_rows),
+    ]
+
+    for tbl_idx, (title, tab_clr, large, hdrs, rows) in enumerate(sheets_cfg, 1):
+        sh = wb.create_sheet(title)
+        sh.sheet_view.showGridLines = False
+        sh.sheet_properties.tabColor = tab_clr
+        sh.freeze_panes = "B2"
+
+        sh.append(hdrs)
+        for row in rows: sh.append(row)
+        max_r = sh.max_row
+
+        # 欄位標題
+        for col_idx in range(1, len(hdrs) + 1):
+            c = sh.cell(row=1, column=col_idx)
+            c.fill = F_HDR; c.border = FULL_B
+            c.font = Font(color="FFFFFF", bold=True, size=10)
+            c.alignment = Alignment(horizontal="center", vertical="center")
+        sh.row_dimensions[1].height = 22
+
+        # 行高 & 框線（小表才逐格）
+        for row_idx in range(2, max_r + 1):
+            sh.row_dimensions[row_idx].height = 18
+            if not large:
+                for col_idx in range(1, len(hdrs) + 1):
+                    sh.cell(row=row_idx, column=col_idx).border = FULL_B
+
+        # Excel Table
+        if max_r > 1:
+            tbl = Table(displayName=f"ReportTable{tbl_idx}",
+                        ref=f"A1:{get_column_letter(len(hdrs))}{max_r}")
+            tbl.tableStyleInfo = TableStyleInfo(
+                name="TableStyleMedium2", showRowStripes=not large)
+            sh.add_table(tbl)
+
+        all_range = f"A2:{get_column_letter(len(hdrs))}{max_r}"
+
+        # 條件格式：TP/FP/FN/TN 整行底色
+        result_key = "結果" if "結果" in hdrs else "類型"
+        if result_key in hdrs:
+            rc = get_column_letter(hdrs.index(result_key) + 1)
+            sh.conditional_formatting.add(all_range,
+                FormulaRule(formula=[f'ISNUMBER(SEARCH("FN",${rc}2))'], fill=F_RED))
+            sh.conditional_formatting.add(all_range,
+                FormulaRule(formula=[f'ISNUMBER(SEARCH("FP",${rc}2))'], fill=F_ORANGE))
+            if large:
+                sh.conditional_formatting.add(all_range,
+                    FormulaRule(formula=[f'OR(${rc}2="TP",${rc}2="TN")'], fill=F_GREEN))
+
+        # 條件格式：風險等級底色
+        if "風險等級" in hdrs:
+            rlc = get_column_letter(hdrs.index("風險等級") + 1)
+            rl_range = f"{rlc}2:{rlc}{max_r}"
+            sh.conditional_formatting.add(rl_range,
+                FormulaRule(formula=[f'${rlc}2="高"'],
+                            fill=F_RED,    font=Font(color="DC2626", bold=True)))
+            sh.conditional_formatting.add(rl_range,
+                FormulaRule(formula=[f'${rlc}2="中"'],
+                            fill=F_ORANGE, font=Font(color="D97706", bold=True)))
+            sh.conditional_formatting.add(rl_range,
+                FormulaRule(formula=[f'${rlc}2="低"'],
+                            fill=F_GREEN,  font=Font(color="059669", bold=True)))
+
+        # Data Bar：風險評分
+        if "風險評分" in hdrs:
+            rsc = get_column_letter(hdrs.index("風險評分") + 1)
+            sh.conditional_formatting.add(f"{rsc}2:{rsc}{max_r}",
+                DataBarRule(start_type="num", start_value=0,
+                            end_type="num",   end_value=1,
+                            color="1E9FFB",   showValue=True,
+                            minLength=0, maxLength=100))
+
+        # 數字格式
+        for row_idx in range(2, max_r + 1):
+            if "風險評分" in hdrs:
+                sh.cell(row=row_idx,
+                        column=hdrs.index("風險評分")+1).number_format = "0.0000"
+            for amt_col in ("金額 (USD)", "金額_USD"):
+                if amt_col in hdrs:
+                    sh.cell(row=row_idx,
+                            column=hdrs.index(amt_col)+1).number_format = "$#,##0.00"
+
+        auto_w(sh)
+        sh.page_setup.orientation = "landscape"
+        sh.page_setup.paperSize = 9
+        sh.page_setup.fitToWidth = 1
+        sh.oddHeader.center.text = title
+        sh.oddFooter.right.text = "第 &P 頁，共 &N 頁"
+
+    output = io.BytesIO()
+    wb.save(output)
+    xlsx_content = base64.b64encode(output.getvalue()).decode("ascii")
+    store = {
+        "filename": "daily_report.xlsx",
+        "content": xlsx_content,
+        "base64": True,
+        "type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }
+    return content, store, {"display": "inline-block"}
 
 
 @app.callback(
@@ -581,7 +1034,12 @@ def generate_report(n_clicks, settings):
 def download_report(n_clicks, store_data):
     if not store_data:
         return no_update
-    return dcc.send_string(store_data["content"], store_data["filename"])
+    return {
+        "content": store_data["content"],
+        "filename": store_data["filename"],
+        "base64": store_data.get("base64", False),
+        "type": store_data.get("type", "text/csv"),
+    }
 
 
 @app.callback(
@@ -656,7 +1114,7 @@ def show_tx_detail(selected_rows, data, settings):
 
             # Info grid
             info_row("風險評分",  f"{risk:.4f}  ({risk*100:.1f}%)", bar_color),
-            info_row("交易金額",  f"€{amount_eur:,.2f}"),
+            info_row("交易金額",  f"${amount_eur:,.2f}"),
             info_row("發生時間",  time_display),
             html.Hr(style={"borderColor": COLORS["border"], "margin": "8px 0"}),
             info_row("真實標籤",  true_label_txt,  true_label_color),
