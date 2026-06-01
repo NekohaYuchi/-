@@ -3,6 +3,8 @@ fraud_model_pipeline.pkl
 test_data.pkl
 scaler.pkl
 daily_report.csv
+train_data.pkl
+val_data.pkl
 
 # Brainstorm 暫存
 .superpowers/

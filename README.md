@@ -10,14 +10,14 @@
 ## 專案結構
 
 ```
-├── Credit_Card_Fraud_Detection.ipynb   # 模型訓練 Notebook（張睿）
-├── system.py                           # Gradio 版儀表板
-├── system_dash.py                      # Dash 版儀表板（側邊欄三頁面）
+├── Credit_Card_Fraud_Detection.ipynb   # 模型訓練 Notebook
+├── train_model.py                      # 本地訓練腳本
+├── system_dash.py                      # Dash 儀表板（側邊欄三頁面）
 ├── setup.py                            # 一鍵下載預訓練模型
 └── README.md
 ```
 
-> `fraud_model_pipeline.pkl` 與 `test_data.pkl` 不在版本庫中，可用 `setup.py` 自動下載或手動訓練產生。
+> `fraud_model_pipeline.pkl`、`test_data.pkl`、`scaler.pkl` 不在版本庫中，可用 `setup.py` 自動下載或執行 `train_model.py` 自行訓練產生。
 
 ---
 
@@ -26,9 +26,8 @@
 ### Step 1：安裝套件
 
 ```bash
-pip install pandas numpy scikit-learn xgboost joblib plotly
-pip install dash dash-bootstrap-components   # Dash 版
-pip install gradio                           # Gradio 版（可選）
+pip install pandas numpy scikit-learn imbalanced-learn xgboost joblib
+pip install dash dash-bootstrap-components plotly openpyxl
 ```
 
 ### Step 2：下載預訓練模型
@@ -37,27 +36,25 @@ pip install gradio                           # Gradio 版（可選）
 python setup.py
 ```
 
-自動從 GitHub Releases 下載 `fraud_model_pipeline.pkl`（56MB）與 `test_data.pkl`（16MB）。
+自動從 GitHub Releases 下載 `fraud_model_pipeline.pkl`（47MB）、`test_data.pkl`（16MB）、`scaler.pkl`。
 
 ### Step 3：啟動系統
 
-**Dash 版（推薦）**
 ```bash
 python system_dash.py
 ```
-開啟瀏覽器：`http://127.0.0.1:8050`
 
-**Gradio 版（原版）**
-```bash
-python system.py
-```
-開啟瀏覽器：`http://127.0.0.1:7860/?__theme=dark`
+開啟瀏覽器：`http://127.0.0.1:8050`
 
 ---
 
 ## 自行訓練模型（進階）
 
-不想使用預訓練模型的話，可執行 `Credit_Card_Fraud_Detection.ipynb` 全部 cell 自行訓練（需要 Kaggle 帳號，約 30–60 秒）。
+```bash
+python train_model.py
+```
+
+需要 Kaggle 帳號，資料集自動下載，訓練約需 2–5 分鐘（含 5-Fold CV）。
 
 ---
 
@@ -77,25 +74,29 @@ python system.py
 | 商業利潤試算 | 依漏抓成本（FN）與誤判成本（FP）計算銀行淨防護收益 |
 | 動態利潤曲線 | 顯示不同閥值下的預期獲利，標記當前決策點 |
 | XAI 特徵解釋 | XGBoost 前 10 大核心風控特徵重要性（可解釋 AI） |
-| 每日營運報表 | 一鍵產出今日交易績效摘要並下載 CSV |
+| 每日營運報表 | 一鍵產出今日交易績效摘要並下載 Excel（含三個工作表） |
+| 交易詳細面板 | 點選監控表格任一列，展開該筆交易的風險分析與 SOP |
 
-### Dash 版額外特色
+### 側邊欄三頁面導覽
 
-- 側邊欄三頁面導覽：**監控 / 分析 / 報表**
-- 頁面載入後自動填入資料（無需手動點擊）
-- 所有控制項常駐側邊欄，切換頁面不中斷操作
+- **監控**：即時交易流、判定結果、SOP、利潤試算
+- **分析**：XAI 特徵重要性圖、動態利潤最佳化曲線
+- **報表**：每日營運摘要、高風險交易清單、Excel 下載
 
 ---
 
 ## 模型架構
 
 ```
-BorderlineSMOTE（過採樣）
-  ↓
-RandomUnderSampler（欠採樣）
+BorderlineSMOTE（過採樣，sampling_strategy=0.1）
   ↓
 XGBoost Classifier
   n_estimators=150, max_depth=6, learning_rate=0.05
 ```
+
+**訓練流程：**
+1. 先切分訓練 / 測試集（8:2，stratify），再標準化（避免 Data Leakage）
+2. 從訓練集切出 15% 作為 Validation Set（供門檻搜尋）
+3. 5-Fold 交叉驗證評估模型穩定性
 
 資料集：[Kaggle — Credit Card Fraud Detection](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud)（284,807 筆歐洲信用卡交易，詐騙率 0.17%）
