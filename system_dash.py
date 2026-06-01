@@ -12,15 +12,18 @@ import dash_bootstrap_components as dbc
 
 # ── 配色常數 ──────────────────────────────────────────────
 COLORS = {
-    "bg_page":    "#0f172a",
-    "bg_card":    "#1e293b",
-    "bg_sidebar": "#1e293b",
-    "accent":     "#3b82f6",
-    "text":       "#e2e8f0",
-    "text_muted": "#64748b",
-    "fraud":      "#ef4444",
-    "safe":       "#22c55e",
-    "border":     "#334155",
+    "bg_page":    "#0B111A",
+    "bg_card":    "#1F2937",
+    "bg_sidebar": "#111827",
+    "bg_input":   "#273142",
+    "accent":     "#1E9FFB",
+    "cyan":       "#22D3EE",
+    "text":       "#F5F7FA",
+    "text_muted": "#9CA3AF",
+    "fraud":      "#EF4444",
+    "safe":       "#00D084",
+    "warning":    "#F59E0B",
+    "border":     "#2F3B4A",
 }
 
 # ── 載入模型與測試資料 ─────────────────────────────────────
@@ -68,10 +71,13 @@ FIG_IMPORTANCE = px.bar(
     x=top_importances, y=top_features, orientation="h",
     title="XGBoost 全局核心風控特徵 (Top 10)",
     labels={"x": "相對重要性得分", "y": "加密特徵欄位 (PCA)"},
-    color=top_importances, color_continuous_scale="Blues",
+    color=top_importances,
+    color_continuous_scale=[[0, "#1a3a5c"], [0.5, "#1E9FFB"], [1, "#22D3EE"]],
 )
 FIG_IMPORTANCE.update_layout(
-    yaxis={"categoryorder": "total ascending"},
+    yaxis={"categoryorder": "total ascending",
+           "gridcolor": COLORS["border"], "gridwidth": 1},
+    xaxis={"gridcolor": COLORS["border"], "gridwidth": 1},
     paper_bgcolor=COLORS["bg_card"],
     plot_bgcolor=COLORS["bg_card"],
     font={"color": COLORS["text"]},
@@ -107,14 +113,16 @@ TABLE_KWARGS = dict(
     style_table={"overflowX": "auto"},
     style_header={
         "backgroundColor": COLORS["bg_sidebar"],
-        "color": COLORS["text"], "fontWeight": "bold",
+        "color": COLORS["cyan"], "fontWeight": "600",
         "border": f"1px solid {COLORS['border']}",
+        "fontSize": "11px", "letterSpacing": "0.05em", "textTransform": "uppercase",
     },
     style_cell={
-        "backgroundColor": COLORS["bg_card"],
+        "backgroundColor": COLORS["bg_input"],
         "color": COLORS["text_muted"],
-        "textAlign": "center", "padding": "8px",
+        "textAlign": "center", "padding": "9px 8px",
         "border": f"1px solid {COLORS['border']}",
+        "fontFamily": "monospace", "fontSize": "13px",
     },
     style_data_conditional=[
         {"if": {"filter_query": '{系統判定狀態} contains "詐騙"'},
@@ -197,7 +205,7 @@ def page_report():
                                 "border": f"1px solid {COLORS['border']}",
                                 "marginBottom": "12px"}),
                 dcc.Download(id="report-download"),
-                dbc.Button("⬇ 下載報表 CSV", id="download-btn",
+                dbc.Button("下載報表 CSV", id="download-btn",
                            color="success", style={"display": "none"}),
             ], width=8),
         ]),
@@ -237,27 +245,27 @@ app.layout = html.Div([
 
     # ── 側邊欄 ──────────────────────────────────────
     html.Div([
-        html.H6("🏦 信用卡防詐系統",
+        html.H6("信用卡防詐系統",
                 style={"color": COLORS["text"], "fontSize": "14px", "marginBottom": "2px"}),
         html.P("工資系 商管程式設計 期末專題",
                style={"color": COLORS["text_muted"], "fontSize": "11px", "marginBottom": "12px"}),
         html.Hr(style={"borderColor": COLORS["border"]}),
 
         dbc.Nav([
-            dbc.NavLink("📡 監控", href="/",         active="exact",
+            dbc.NavLink("監控", href="/",         active="exact",
                         style={"color": COLORS["text"], "borderRadius": "6px",
                                "marginBottom": "4px", "fontSize": "13px"}),
-            dbc.NavLink("📊 分析", href="/analysis",  active="exact",
+            dbc.NavLink("分析", href="/analysis",  active="exact",
                         style={"color": COLORS["text"], "borderRadius": "6px",
                                "marginBottom": "4px", "fontSize": "13px"}),
-            dbc.NavLink("📋 報表", href="/report",    active="exact",
+            dbc.NavLink("報表", href="/report",    active="exact",
                         style={"color": COLORS["text"], "borderRadius": "6px",
                                "marginBottom": "4px", "fontSize": "13px"}),
         ], vertical=True, pills=True),
 
         html.Hr(style={"borderColor": COLORS["border"]}),
 
-        html.Label("銀行營運方針", style={"color": COLORS["text_muted"], "fontSize": "11px"}),
+        html.Label("銀行營運方針", style={"color": COLORS["text"], "fontSize": "12px"}),
         dcc.Dropdown(
             id="scenario-dropdown",
             options=[
@@ -268,22 +276,22 @@ app.layout = html.Div([
             value="balanced", clearable=False,
             style={"fontSize": "12px", "marginBottom": "12px"},
         ),
-        html.Label("風險判定閥值", style={"color": COLORS["text_muted"], "fontSize": "11px"}),
+        html.Label("風險判定閥值", style={"color": COLORS["text"], "fontSize": "12px"}),
         dcc.Slider(id="threshold-slider", min=0.01, max=0.99, step=0.01, value=0.50,
-                   tooltip={"placement": "right", "always_visible": True},
+                   tooltip={"placement": "bottom", "always_visible": True},
                    marks={0.01: "0", 0.5: "0.5", 0.99: "1"},
                    className="mb-3"),
-        html.Label("漏抓成本 FN Cost (USD/筆)", style={"color": COLORS["text_muted"], "fontSize": "11px"}),
+        html.Label("漏抓成本 FN Cost (USD/筆)", style={"color": COLORS["text"], "fontSize": "12px"}),
         dcc.Slider(id="cost-fn-slider", min=50, max=1000, step=10, value=250,
-                   tooltip={"placement": "right", "always_visible": True},
+                   tooltip={"placement": "bottom", "always_visible": True},
                    marks={50: "50", 500: "500", 1000: "1000"},
                    className="mb-3"),
-        html.Label("誤判成本 FP Cost (USD/筆)", style={"color": COLORS["text_muted"], "fontSize": "11px"}),
+        html.Label("誤判成本 FP Cost (USD/筆)", style={"color": COLORS["text"], "fontSize": "12px"}),
         dcc.Slider(id="cost-fp-slider", min=1, max=100, step=1, value=15,
-                   tooltip={"placement": "right", "always_visible": True},
+                   tooltip={"placement": "bottom", "always_visible": True},
                    marks={1: "1", 50: "50", 100: "100"},
                    className="mb-3"),
-        dbc.Button("📥 接收即時交易", id="simulate-btn", color="primary",
+        dbc.Button("接收即時交易", id="simulate-btn", color="primary",
                    size="sm", className="w-100 mt-2"),
     ], style=_sidebar_style),
 
@@ -291,10 +299,10 @@ app.layout = html.Div([
     html.Div([
         # KPI 卡（所有頁面皆顯示）
         dbc.Row([
-            dbc.Col(make_kpi_card("今日攔截筆數",    "kpi-intercepted", COLORS["fraud"]),  width=3),
-            dbc.Col(make_kpi_card("防護金額 (USD)",   "kpi-saved",       COLORS["safe"]),   width=3),
-            dbc.Col(make_kpi_card("模型 AUC",          "kpi-auc",         COLORS["accent"]), width=3),
-            dbc.Col(make_kpi_card("當前閥值",           "kpi-threshold",   "#f59e0b"),        width=3),
+            dbc.Col(make_kpi_card("今日攔截筆數",    "kpi-intercepted", COLORS["fraud"]),   width=3),
+            dbc.Col(make_kpi_card("防護金額 (USD)",   "kpi-saved",       COLORS["safe"]),    width=3),
+            dbc.Col(make_kpi_card("模型 AUC",          "kpi-auc",         COLORS["cyan"]),    width=3),
+            dbc.Col(make_kpi_card("當前閥值",           "kpi-threshold",   COLORS["warning"]), width=3),
         ], className="mb-3 g-2"),
 
         # 三個頁面（全在 DOM，CSS 切換顯示）
@@ -372,7 +380,7 @@ def update_dashboard(n_intervals, n_clicks, threshold, cost_fn, cost_fp,
 
     # ── 判定結果與 SOP ───────────────────────────────
     is_fraud   = risk >= threshold
-    status_txt = "🚨 詐騙警示 (FRAUD)" if is_fraud else "✅ 安全交易 (SAFE)"
+    status_txt = "[!] 詐騙警示 (FRAUD)" if is_fraud else "[OK] 安全交易 (SAFE)"
     if is_fraud:
         sop = (
             "[風控系統核心響應機制觸發]:\n"
@@ -434,16 +442,19 @@ def update_dashboard(n_intervals, n_clicks, threshold, cost_fn, cost_fp,
         df_curve, x="Threshold", y="Profit",
         title="動態利潤最佳化曲線圖",
         labels={"Threshold": "判定閥值", "Profit": "預期淨利潤 (USD)"},
+        color_discrete_sequence=[COLORS["accent"]],
     )
     fig_curve.add_scatter(
         x=[threshold], y=[net], mode="markers",
-        marker={"size": 12, "color": COLORS["fraud"]}, name="當前決策點",
+        marker={"size": 10, "color": COLORS["warning"], "symbol": "diamond"},
+        name="當前決策點",
     )
     min_p, max_p = df_curve["Profit"].min(), df_curve["Profit"].max()
     p_range = max(float(max_p - min_p), 1.0)
     fig_curve.update_layout(
-        xaxis={"range": [0, 1]},
-        yaxis={"range": [min_p - p_range * 0.05, max_p + p_range * 0.05]},
+        xaxis={"range": [0, 1], "gridcolor": COLORS["border"], "gridwidth": 1},
+        yaxis={"range": [min_p - p_range * 0.05, max_p + p_range * 0.05],
+               "gridcolor": COLORS["border"], "gridwidth": 1},
         paper_bgcolor=COLORS["bg_card"], plot_bgcolor=COLORS["bg_card"],
         font={"color": COLORS["text"]},
         margin={"l": 10, "r": 10, "b": 30, "t": 40},
