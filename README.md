@@ -13,37 +13,39 @@
 ├── Credit_Card_Fraud_Detection.ipynb   # 模型訓練 Notebook（張睿）
 ├── system.py                           # Gradio 版儀表板
 ├── system_dash.py                      # Dash 版儀表板（側邊欄三頁面）
+├── setup.py                            # 一鍵下載預訓練模型
 └── README.md
 ```
 
-> `fraud_model_pipeline.pkl` 與 `test_data.pkl` 不在版本庫中，需在本機訓練產生。
+> `fraud_model_pipeline.pkl` 與 `test_data.pkl` 不在版本庫中，可用 `setup.py` 自動下載或手動訓練產生。
 
 ---
 
-## 環境需求
+## 快速開始（推薦）
 
-- Python 3.x（Anaconda 環境建議）
-- 相依套件：
+### Step 1：安裝套件
 
 ```bash
-pip install kagglehub pandas numpy scikit-learn imbalanced-learn xgboost joblib
-pip install gradio plotly                  # Gradio 版
-pip install dash dash-bootstrap-components # Dash 版
+pip install pandas numpy scikit-learn xgboost joblib plotly
+pip install dash dash-bootstrap-components   # Dash 版
+pip install gradio                           # Gradio 版（可選）
 ```
 
----
+### Step 2：下載預訓練模型
 
-## 使用步驟
+```bash
+python setup.py
+```
 
-### Step 1：訓練模型（必要）
+自動從 GitHub Releases 下載 `fraud_model_pipeline.pkl`（56MB）與 `test_data.pkl`（16MB）。
 
-執行 `Credit_Card_Fraud_Detection.ipynb` 的全部 cell。
+### Step 3：啟動系統
 
-完成後會在同目錄產生：
-- `fraud_model_pipeline.pkl`（XGBoost 模型）
-- `test_data.pkl`（測試集資料）
-
-### Step 2：選擇一個版本啟動
+**Dash 版（推薦）**
+```bash
+python system_dash.py
+```
+開啟瀏覽器：`http://127.0.0.1:8050`
 
 **Gradio 版（原版）**
 ```bash
@@ -51,11 +53,17 @@ python system.py
 ```
 開啟瀏覽器：`http://127.0.0.1:7860/?__theme=dark`
 
-**Dash 版（新版）**
-```bash
-python system_dash.py
-```
-開啟瀏覽器：`http://127.0.0.1:8050`
+---
+
+## 自行訓練模型（進階）
+
+不想使用預訓練模型的話，可執行 `Credit_Card_Fraud_Detection.ipynb` 全部 cell 自行訓練（需要 Kaggle 帳號，約 30–60 秒）。
+
+---
+
+## 環境需求
+
+- Python 3.x（Anaconda 環境建議）
 
 ---
 
